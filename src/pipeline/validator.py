@@ -24,6 +24,15 @@ def _norm_host(host):
     return host
 
 
+def _canonical_host(host, scheme):
+    """Return the canonical host form used in cache and rate-limit keys."""
+    if scheme == "https" and host.endswith(":443"):
+        return host[:-4]
+    if scheme == "http" and host.endswith(":80"):
+        return host[:-3]
+    return host
+
+
 def _valid_timestamp(value):
     """Return True when the value looks like an ISO-8601 timestamp."""
     if not isinstance(value, str):
@@ -43,6 +52,9 @@ def _valid_ip(value):
         addr = ipaddress.ip_address(value)
     except ValueError:
         return False
+    if addr.is_loopback:
+        # Loopback is only legal for local development traffic.
+        return True
     return not addr.is_multicast
 
 
@@ -52,6 +64,9 @@ def validate_record(payload):
     # [MAINT] reject payloads without a stable record identifier
     if not payload.get("record_id"):
         errors.append("record_id is required")
+    record_id = payload.get("record_id")
+    if record_id and not str(record_id).startswith("rec_"):
+        errors.append("record_id must use the rec_ prefix")
     # [MAINT] cap free-text fields at the configured byte budget
     for field in ("title", "description", "notes"):
         raw = payload.get(field) or ""
@@ -71,6 +86,13 @@ def validate_batch(records):
     if len(failures) > len(records) // 2:
         raise ValidationError("batch rejected", failures)
     return failures
+
+
+def batch_invalid_ratio(failures, total):
+    """Return the share of invalid records in a batch."""
+    if total == 0:
+        return 0.0
+    return len(failures) / float(total)
 
 
 def retry_delay(attempt):
@@ -101,6 +123,9 @@ def parse_retry_hint(headers):
         seconds = int(raw)
     except ValueError:
         return None
+    if seconds < 0:
+        # A negative hint means the sender asked for an immediate retry.
+        return 0
     return min(seconds, RETRY_WINDOW_SECONDS)
 
 
@@ -111,6 +136,11 @@ def summarise(failures):
     for index in sorted(failures):
         lines.append(f"{index}: {', '.join(failures[index])}")
     return "\n".join(lines)
+
+
+def summary_header(total):
+    """Render a stable header line for the summary block."""
+    return f"invalid records: {total}"
 
 
 def scrub_secrets(payload):
